@@ -100,7 +100,7 @@ def optimizar_tsp_local(sub_ruta):
     menor_distancia = float("inf")
 
     # Evaluar todas las permutaciones posibles de visita
-    for perm en itertools.permutations(sub_ruta):
+    for perm in itertools.permutations(sub_ruta):
         distancia_actual = calcular_distancia_circuito(perm)
         if distancia_actual < menor_distancia:
             menor_distancia = distancia_actual
