@@ -2,21 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 Sabor Sabanero S.A.S. - Sistema de Optimización de Flotas y Cadena de Frío
-Desarrollado para la distribución en la Sabana de Bogotá.
+Adaptado para Streamlit
 """
 import math
 import itertools
-from datetime import datetime, timedelta
+from datetime import datetime
+import streamlit as st
+import pandas as pd
 
-# --- 1. CONFIGURACIÓN GEOGRÁFICA Y DATOS DE ENTRADA ---
+# --- 1. CONFIGURACIÓN GEOGRÁFICA ---
 CEDI_TOCANCIPA = {
-    "id": "tocancipa",
-    "nombre": "CEDI Tocancipá",
-    "lat": 4.964,
-    "lng": -73.912,
-    "demanda": 0,
-    "descarga": 0,
-    "color": "Green"
+    "id": "tocancipa", "nombre": "CEDI Tocancipá",
+    "lat": 4.964, "lng": -73.912, "demanda": 0, "descarga": 0
 }
 
 BASE_CLIENTES = [
@@ -27,12 +24,9 @@ BASE_CLIENTES = [
     {"id": "briceno",   "nombre": "Briceño",   "lat": 4.945, "lng": -73.921, "demanda": 500,  "descarga": 10},
 ]
 
-TRUCK_CAPACITY = 2200
-MAX_TRUCKS = 3
 SCALE_FACTOR_KM_DEGREE = 111.0
-VELOCIDAD_PROMEDIO_KMH = 45.0
 
-# --- 2. UTILIDADES DE CÁLCULO ---
+# --- 2. UTILIDADES ---
 def calcular_distancia_km(p1, p2):
     dy = p1["lat"] - p2["lat"]
     dx = p1["lng"] - p2["lng"]
@@ -44,247 +38,240 @@ def convertir_hora_a_minutos(hora_str):
 
 def convertir_minutos_a_hora(minutos):
     minutos_mod = int(minutos % 1440)
-    horas = minutos_mod // 60
-    mins = minutos_mod % 60
-    return f"{horas:02d}:{mins:02d}"
+    return f"{minutos_mod // 60:02d}:{minutos_mod % 60:02d}"
 
-# --- 3. ALGORITMOS DE OPTIMIZACIÓN (VRP & TSP) ---
-def verificar_viabilidad_flota(clientes, capacidad_max, max_camiones):
-    demanda_total = sum(c["demanda"] for c in clientes)
-    capacidad_total = capacidad_max * max_camiones
-    if demanda_total > capacidad_total:
-        print(f"⚠️  ALERTA CRÍTICA: La demanda total ({demanda_total} kg) excede la capacidad de la flota ({capacidad_total} kg).")
-        return False
-    return True
-
+# --- 3. VRP & TSP ---
 def resolver_vrp(clientes, capacidad_max):
     clientes_ordenados = sorted(clientes, key=lambda c: c["demanda"], reverse=True)
     rutas = []
     for cliente in clientes_ordenados:
         asignado = False
         for r in rutas:
-            carga_actual = sum(c["demanda"] for c in r)
-            if carga_actual + cliente["demanda"] <= capacidad_max:
+            if sum(c["demanda"] for c in r) + cliente["demanda"] <= capacidad_max:
                 r.append(cliente)
                 asignado = True
                 break
         if not asignado:
             rutas.append([cliente])
-    rutas_optimizadas = []
-    for r in rutas:
-        rutas_optimizadas.append(optimizar_tsp_local(r))
-    return rutas_optimizadas
+    return [optimizar_tsp_local(r) for r in rutas]
 
 def optimizar_tsp_local(sub_ruta):
     if len(sub_ruta) <= 1:
         return sub_ruta
-    mejor_secuencia = list(sub_ruta)
-    menor_distancia = float("inf")
+    mejor, menor = list(sub_ruta), float("inf")
     for perm in itertools.permutations(sub_ruta):
-        distancia_actual = calcular_distancia_circuito(perm)
-        if distancia_actual < menor_distancia:
-            menor_distancia = distancia_actual
-            mejor_secuencia = list(perm)
-    return mejor_secuencia
+        d = calcular_distancia_circuito(perm)
+        if d < menor:
+            menor, mejor = d, list(perm)
+    return mejor
 
 def calcular_distancia_circuito(secuencia):
-    distancia = 0
-    actual = CEDI_TOCANCIPA
+    distancia, actual = 0, CEDI_TOCANCIPA
     for cliente in secuencia:
         distancia += calcular_distancia_km(actual, cliente)
         actual = cliente
-    distancia += calcular_distancia_km(actual, CEDI_TOCANCIPA)
-    return distancia
+    return distancia + calcular_distancia_km(actual, CEDI_TOCANCIPA)
 
-# --- 4. SIMULACIÓN TERMODINÁMICA DE CADENA DE FRÍO ---
+# --- 4. SIMULACIÓN CADENA DE FRÍO ---
 def simular_ruta_vehiculo(clientes_sub_ruta, id_camion, config):
     hora_salida_min = convertir_hora_a_minutos(config["hora_salida"])
-    temp_ambiente = config["temp_ambiente"]
-    temp_inicial = config["temp_inicial"]
-    k_aislamiento = config["coef_aislamiento"]
-    perdida_puerta = config["perdida_puerta"]
+    ta = config["temp_ambiente"]
+    k  = config["coef_aislamiento"]
+    kp = k * 3.5
 
-    tiempo_actual_min = hora_salida_min
-    temp_furgon = temp_inicial
-    distancia_acumulada = 0.0
-    itinerario = []
+    tiempo_actual = hora_salida_min
+    temp = config["temp_inicial"]
+    dist_acum = 0.0
+    itinerario = [{
+        "Punto": CEDI_TOCANCIPA["nombre"],
+        "Llegada": convertir_minutos_a_hora(tiempo_actual),
+        "Tramo (km)": 0.0, "Total (km)": 0.0,
+        "Acción": "Despacho y Carga",
+        "Parada (min)": "--",
+        "Temp (°C)": round(temp, 1),
+        "Estado": "ÓPTIMO"
+    }]
 
-    itinerario.append({
-        "punto": CEDI_TOCANCIPA["nombre"],
-        "llegada": convertir_minutos_a_hora(tiempo_actual_min),
-        "distancia_tramo": 0.0,
-        "distancia_total": 0.0,
-        "accion": "Despacho y Carga de Lácteos",
-        "duracion_accion": 0,
-        "temp_furgon": temp_furgon,
-        "estado": "Óptimo"
-    })
-
-    actual_nodo = CEDI_TOCANCIPA
+    actual = CEDI_TOCANCIPA
     for cliente in clientes_sub_ruta:
-        dist = calcular_distancia_km(actual_nodo, cliente)
-        distancia_acumulada += dist
-        tiempo_viaje_min = round((dist / VELOCIDAD_PROMEDIO_KMH) * 60)
+        dist = calcular_distancia_km(actual, cliente)
+        dist_acum += dist
+        t_viaje = round((dist / config["velocidad"]) * 60)
+        temp = ta - (ta - temp) * math.exp(-k * (t_viaje / 60))
+        tiempo_actual += t_viaje
 
-        horas_viaje = tiempo_viaje_min / 60.0
-        temp_furgon = temp_ambiente - (temp_ambiente - temp_furgon) * math.exp(-k_aislamiento * horas_viaje)
-        tiempo_actual_min += tiempo_viaje_min
+        temp += config["perdida_puerta"]
+        temp = ta - (ta - temp) * math.exp(-kp * (cliente["descarga"] / 60))
+        temp = round(temp, 1)
 
-        temp_furgon += perdida_puerta
-
-        horas_descarga = cliente["descarga"] / 60.0
-        k_puerta_abierta = k_aislamiento * 3.5
-        temp_furgon = temp_ambiente - (temp_ambiente - temp_furgon) * math.exp(-k_puerta_abierta * horas_descarga)
-        temp_furgon = round(temp_furgon, 1)
-
-        if temp_furgon > 6.0:
-            estado = "CRÍTICO (>6°C)"
-        elif temp_furgon > 4.0:
-            estado = "ADVERTENCIA"
-        else:
-            estado = "ÓPTIMO"
-
+        estado = "CRÍTICO (>6°C)" if temp > 6 else ("ADVERTENCIA" if temp > 4 else "ÓPTIMO")
         itinerario.append({
-            "punto": cliente["nombre"],
-            "llegada": convertir_minutos_a_hora(tiempo_actual_min),
-            "distancia_tramo": round(dist, 1),
-            "distancia_total": round(distancia_acumulada, 1),
-            "accion": f"Entrega: {cliente['demanda']} kg",
-            "duracion_accion": cliente["descarga"],
-            "temp_furgon": temp_furgon,
-            "estado": estado
+            "Punto": cliente["nombre"],
+            "Llegada": convertir_minutos_a_hora(tiempo_actual),
+            "Tramo (km)": round(dist, 1),
+            "Total (km)": round(dist_acum, 1),
+            "Acción": f"Entrega {cliente['demanda']} kg",
+            "Parada (min)": cliente["descarga"],
+            "Temp (°C)": temp,
+            "Estado": estado
         })
-        tiempo_actual_min += cliente["descarga"]
-        actual_nodo = cliente
+        tiempo_actual += cliente["descarga"]
+        actual = cliente
 
-    dist_retorno = calcular_distancia_km(actual_nodo, CEDI_TOCANCIPA)
-    distancia_acumulada += dist_retorno
-    tiempo_retorno_min = round((dist_retorno / VELOCIDAD_PROMEDIO_KMH) * 60)
-
-    horas_retorno = tiempo_retorno_min / 60.0
-    temp_furgon = temp_ambiente - (temp_ambiente - temp_furgon) * math.exp(-k_aislamiento * horas_retorno)
-    temp_furgon = round(temp_furgon, 1)
-    tiempo_actual_min += tiempo_retorno_min
+    dist_ret = calcular_distancia_km(actual, CEDI_TOCANCIPA)
+    dist_acum += dist_ret
+    t_ret = round((dist_ret / config["velocidad"]) * 60)
+    temp = round(ta - (ta - temp) * math.exp(-k * (t_ret / 60)), 1)
+    tiempo_actual += t_ret
 
     itinerario.append({
-        "punto": CEDI_TOCANCIPA["nombre"],
-        "llegada": convertir_minutos_a_hora(tiempo_actual_min),
-        "distancia_tramo": round(dist_retorno, 1),
-        "distancia_total": round(distancia_acumulada, 1),
-        "accion": "Cierre de Ruta y Retorno",
-        "duracion_accion": 0,
-        "temp_furgon": temp_furgon,
-        "estado": "CRÍTICO" if temp_furgon > 6.0 else ("ADVERTENCIA" if temp_furgon > 4.0 else "ÓPTIMO")
+        "Punto": CEDI_TOCANCIPA["nombre"],
+        "Llegada": convertir_minutos_a_hora(tiempo_actual),
+        "Tramo (km)": round(dist_ret, 1),
+        "Total (km)": round(dist_acum, 1),
+        "Acción": "Cierre de Ruta",
+        "Parada (min)": "--",
+        "Temp (°C)": temp,
+        "Estado": "CRÍTICO" if temp > 6 else ("ADVERTENCIA" if temp > 4 else "ÓPTIMO")
     })
 
     return {
         "id_camion": id_camion,
         "itinerario": itinerario,
-        "distancia_total": round(distancia_acumulada, 1),
+        "distancia_total": round(dist_acum, 1),
         "carga_total": sum(c["demanda"] for c in clientes_sub_ruta),
-        "tiempo_total_min": tiempo_actual_min - hora_salida_min,
-        "temp_final": temp_furgon,
+        "tiempo_total_min": tiempo_actual - hora_salida_min,
+        "temp_final": temp,
         "clientes": [c["nombre"] for c in clientes_sub_ruta]
     }
 
-# --- 5. VISUALIZACIÓN EN CONSOLA (REPORTE) ---
-def imprimir_reporte_flota(asignaciones):
-    print("=" * 85)
-    print("               SABOR SABANERO S.A.S. - REPORTE DE RUTAS Y CADENA DE FRÍO")
-    print("=" * 85)
+# --- 5. APP STREAMLIT ---
+def main():
+    st.set_page_config(page_title="Sabor Sabanero - Flota", page_icon="🚚", layout="wide")
+    st.title("🚚 Sabor Sabanero S.A.S.")
+    st.caption("Sistema de Optimización de Flotas y Cadena de Frío — Sabana de Bogotá")
 
-    total_distancia = 0.0
-    total_carga = 0
-    camiones_activos = len(asignaciones)
+    # --- SIDEBAR: Parámetros ---
+    with st.sidebar:
+        st.header("⚙️ Parámetros de Flota")
+        truck_capacity = st.slider("Capacidad por camión (kg)", 500, 5000, 2200, 50)
+        max_trucks     = st.slider("Número de camiones", 1, 6, 3)
+        velocidad      = st.slider("Velocidad promedio (km/h)", 20, 90, 45, 5)
 
-    for viaje in asignaciones:
-        total_distancia += viaje["distancia_total"]
-        total_carga += viaje["carga_total"]
+        st.header("🌡️ Cadena de Frío")
+        hora_salida  = st.time_input("Hora de salida", value=datetime.strptime("05:30", "%H:%M").time())
+        temp_amb     = st.slider("Temperatura ambiente (°C)", 5, 25, 15)
+        temp_inicial = st.slider("Temp. inicial furgón (°C)", -2, 4, 2)
+        coef_k       = st.slider("Coef. aislamiento (k)", 0.02, 0.20, 0.08, 0.01)
+        perdida_p    = st.slider("Pérdida por apertura (°C)", 0.1, 2.0, 0.6, 0.1)
 
-        horas_viaje = viaje["tiempo_total_min"] // 60
-        mins_viaje = viaje["tiempo_total_min"] % 60
-        print(f"\n 🚚  CAMIÓN 0{viaje['id_camion'] + 1} | Clientes: {'  ➔  '.join(viaje['clientes'])}")
-        print(f"   • Carga Útil: {viaje['carga_total']} kg / {TRUCK_CAPACITY} kg")
-        print(f"   • Recorrido: {viaje['distancia_total']} km")
-        print(f"   • Duración Estimada: {horas_viaje} h {mins_viaje} min")
-        print(f"   • Temp. Retorno CEDI: {viaje['temp_final']} °C")
-        print("-" * 85)
+        st.header("📦 Demanda por Cliente")
+        demandas = {}
+        for c in BASE_CLIENTES:
+            demandas[c["id"]] = st.number_input(
+                f"{c['nombre']} (kg)", min_value=50, max_value=3000,
+                value=c["demanda"], step=50, key=c["id"]
+            )
 
-        print(f"   {'Punto / Destino':<20} | {'Llegada':<8} | {'Operación / Acción':<24} | {'Parada':<7} | {'Temp. Furgón':<12}")
-        print(f"   {'-'*20}-+-{'-'*8}-+-{'-'*24}-+-{'-'*7}-+-{'-'*12}")
+        correr = st.button("▶ Calcular Rutas", type="primary", use_container_width=True)
 
-        for p in viaje["itinerario"]:
-            duracion_str = f"{p['duracion_accion']} min" if p["duracion_accion"] > 0 else "--"
-            temp_str = f"{p['temp_furgon']} °C ({p['estado']})"
-            print(f"   {p['punto']:<20} | {p['llegada']:<8} | {p['accion']:<24} | {duracion_str:<7} | {temp_str:<12}")
-        print("=" * 85)
+    # --- Aplicar demandas personalizadas ---
+    clientes = []
+    for c in BASE_CLIENTES:
+        cliente = c.copy()
+        cliente["demanda"] = demandas[c["id"]]
+        clientes.append(cliente)
 
-    print("\n 📊  RESUMEN GENERAL DE LA FLOTA:")
-    print(f"   • Camiones Utilizados : {camiones_activos} de {MAX_TRUCKS} disponibles")
-    print(f"   • Carga Total Entregada: {total_carga} kg")
-    print(f"   • Recorrido Total Flota: {total_distancia:.1f} km")
-    print("=" * 85)
+    demanda_total   = sum(c["demanda"] for c in clientes)
+    capacidad_total = truck_capacity * max_trucks
 
-# --- 6. VISUALIZACIÓN GEOGRÁFICA (OPCIONAL) ---
-def graficar_rutas_sabanera(asignaciones):
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("\n 💡  Nota: Para visualizar el plano geográfico instale matplotlib: 'pip install matplotlib'")
+    # --- KPIs superiores ---
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Demanda total", f"{demanda_total:,} kg")
+    col2.metric("Capacidad flota", f"{capacidad_total:,} kg")
+    col3.metric("Margen disponible", f"{capacidad_total - demanda_total:,} kg")
+    col4.metric("Camiones disponibles", max_trucks)
+
+    if demanda_total > capacidad_total:
+        st.error(f"⚠️ La demanda ({demanda_total:,} kg) supera la capacidad de la flota ({capacidad_total:,} kg). Ajusta los parámetros.")
         return
 
-    plt.figure(figsize=(9, 7))
-    plt.style.use('dark_background')
+    if not correr:
+        st.info("Ajusta los parámetros en el panel izquierdo y presiona **▶ Calcular Rutas**.")
+        return
 
-    plt.plot(CEDI_TOCANCIPA["lng"], CEDI_TOCANCIPA["lat"], 'gH', markersize=14, label="CEDI Tocancipá (Base)")
-    plt.text(CEDI_TOCANCIPA["lng"] + 0.003, CEDI_TOCANCIPA["lat"] + 0.003, "CEDI Tocancipá", color='lightgreen', fontweight='bold')
-
-    colores_camion = ['#38bdf8', '#c084fc', '#facc15']
-
-    for idx, viaje in enumerate(asignaciones):
-        color = colores_camion[idx % len(colores_camion)]
-        latitudes = [CEDI_TOCANCIPA["lat"]]
-        longitudes = [CEDI_TOCANCIPA["lng"]]
-
-        for cli_name in viaje["clientes"]:
-            cli = next(c for c in BASE_CLIENTES if c["nombre"] == cli_name)
-            latitudes.append(cli["lat"])
-            longitudes.append(cli["lng"])
-            plt.plot(cli["lng"], cli["lat"], 'o', color=color, markersize=10)
-            plt.text(cli["lng"] + 0.003, cli["lat"] + 0.003, f"{cli['nombre']} ({cli['demanda']} kg)", color='white', fontsize=9)
-
-        latitudes.append(CEDI_TOCANCIPA["lat"])
-        longitudes.append(CEDI_TOCANCIPA["lng"])
-        plt.plot(longitudes, latitudes, color=color, linestyle='--', linewidth=2.5, label=f"Ruta Camión {viaje['id_camion'] + 1}")
-
-    plt.title("Sabor Sabanero S.A.S. - Rutas Optimizadas de Reparto", fontsize=12, fontweight='bold', pad=15)
-    plt.xlabel("Longitud (X)")
-    plt.ylabel("Latitud (Y)")
-    plt.grid(True, color='#1e293b', linestyle=':')
-    plt.legend(loc='best')
-    plt.tight_layout()
-    print("\n 🎨  Mostrando plano geográfico en ventana emergente...")
-    plt.show()
-
-# --- 7. FLUJO DE EJECUCIÓN ---
-if __name__ == "__main__":
-    configuracion_simulacion = {
-        "hora_salida":      "05:30",
-        "temp_ambiente":     15.0,
-        "temp_inicial":       2.0,
-        "coef_aislamiento":  0.08,
-        "perdida_puerta":     0.6,
+    # --- Ejecutar optimización ---
+    config = {
+        "hora_salida":    hora_salida.strftime("%H:%M"),
+        "temp_ambiente":  float(temp_amb),
+        "temp_inicial":   float(temp_inicial),
+        "coef_aislamiento": coef_k,
+        "perdida_puerta": perdida_p,
+        "velocidad":      float(velocidad),
     }
 
-    print("Verificando viabilidad de la flota...")
-    if verificar_viabilidad_flota(BASE_CLIENTES, TRUCK_CAPACITY, MAX_TRUCKS):
-        print("Calculando asignación de rutas mínimas (VRP + TSP)...")
+    with st.spinner("Optimizando rutas (VRP + TSP)..."):
+        sub_rutas = resolver_vrp(clientes, truck_capacity)
+        viajes = [simular_ruta_vehiculo(r, i, config) for i, r in enumerate(sub_rutas)]
 
-        sub_rutas_agrupadas = resolver_vrp(BASE_CLIENTES, TRUCK_CAPACITY)
+    st.success(f"✅ {len(viajes)} rutas calculadas correctamente.")
 
-        viajes_simulados = []
-        for i, sub_ruta in enumerate(sub_rutas_agrupadas):
-            viajes_simulados.append(simular_ruta_vehiculo(sub_ruta, i, configuracion_simulacion))
+    # --- Mapa de rutas ---
+    st.subheader("🗺️ Mapa de Rutas")
+    puntos_mapa = [{"lat": CEDI_TOCANCIPA["lat"], "lon": CEDI_TOCANCIPA["lng"], "nombre": "CEDI Tocancipá"}]
+    for c in clientes:
+        puntos_mapa.append({"lat": c["lat"], "lon": c["lng"], "nombre": c["nombre"]})
+    st.map(pd.DataFrame(puntos_mapa))
 
-        imprimir_reporte_flota(viajes_simulados)
-        graficar_rutas_sabanera(viajes_simulados)
+    # --- Detalle por camión ---
+    st.subheader("📋 Detalle de Rutas")
+    colores = ["🔵", "🟣", "🟡", "🟠", "🔴", "🟢"]
+
+    for viaje in viajes:
+        hh = viaje["tiempo_total_min"] // 60
+        mm = viaje["tiempo_total_min"] % 60
+        icono = colores[viaje["id_camion"] % len(colores)]
+
+        with st.expander(
+            f"{icono} Camión {viaje['id_camion'] + 1}  |  "
+            f"{' → '.join(viaje['clientes'])}  |  "
+            f"{viaje['carga_total']:,} kg  |  {viaje['distancia_total']} km  |  {hh}h {mm}min",
+            expanded=True
+        ):
+            df = pd.DataFrame(viaje["itinerario"])
+
+            def colorear_estado(val):
+                if "CRÍTICO" in str(val):
+                    return "background-color: #fee2e2; color: #991b1b;"
+                elif "ADVERTENCIA" in str(val):
+                    return "background-color: #fef9c3; color: #854d0e;"
+                elif "ÓPTIMO" in str(val):
+                    return "background-color: #dcfce7; color: #166534;"
+                return ""
+
+            st.dataframe(
+                df.style.map(colorear_estado, subset=["Estado"]),
+                use_container_width=True, hide_index=True
+            )
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Carga útil", f"{viaje['carga_total']:,} kg / {truck_capacity:,} kg")
+            c2.metric("Distancia total", f"{viaje['distancia_total']} km")
+            c3.metric("Temp. al retorno", f"{viaje['temp_final']} °C",
+                      delta_color="inverse",
+                      delta="OK" if viaje["temp_final"] <= 4 else "⚠ Revisar")
+
+    # --- Resumen general ---
+    st.subheader("📊 Resumen General")
+    resumen = pd.DataFrame([{
+        "Camión": f"Camión {v['id_camion'] + 1}",
+        "Clientes": " → ".join(v["clientes"]),
+        "Carga (kg)": v["carga_total"],
+        "Distancia (km)": v["distancia_total"],
+        "Duración": f"{v['tiempo_total_min']//60}h {v['tiempo_total_min']%60}min",
+        "Temp. retorno (°C)": v["temp_final"]
+    } for v in viajes])
+    st.dataframe(resumen, use_container_width=True, hide_index=True)
+
+if __name__ == "__main__":
+    main()
